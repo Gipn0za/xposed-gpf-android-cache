@@ -1,0 +1,3 @@
+<resources>
+    <string name="app_description">LSPosed module: intercept SkyLeap WebView GBF resources and serve local files.</string>
+</resources>
