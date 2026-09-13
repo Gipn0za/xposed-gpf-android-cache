@@ -4,14 +4,14 @@ plugins {
 
 android {
     namespace 'com.frinsecta.gbfcache'
-    compileSdk 33
+    compileSdk 34
 
     defaultConfig {
         applicationId 'com.frinsecta.gbfcache'
-        minSdk 24
-        targetSdk 28
-        versionCode 1
-        versionName '0.1.0'
+        minSdk 26
+        targetSdk 34
+        versionCode 2
+        versionName '0.1.102'
     }
 
     buildTypes {
@@ -28,8 +28,20 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
+
+    packaging {
+        resources {
+            // 确保 META-INF/xposed 下的文件不会被误合并或剔除
+            merges += []
+            excludes += []
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
 }
 
 dependencies {
-    compileOnly files('libs/api-82.jar')
+    compileOnly("io.github.libxposed:api:102.0.0")
 }

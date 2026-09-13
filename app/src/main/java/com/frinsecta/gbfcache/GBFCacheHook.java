@@ -32,13 +32,47 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import android.util.Log;
 
-public class GBFCacheHook implements IXposedHookLoadPackage {
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
+
+public class GBFCacheHook extends XposedModule {
+    private static volatile GBFCacheHook INSTANCE;
+    private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean(false);
+
+    private static void xlog(String msg) {
+        GBFCacheHook self = INSTANCE;
+        if (self != null) {
+            try {
+                self.log(Log.INFO, TAG, msg);
+                return;
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.i(TAG, msg);
+    }
+
+    private static void xlog(String msg, Throwable tr) {
+        GBFCacheHook self = INSTANCE;
+        if (self != null) {
+            try {
+                self.log(Log.ERROR, TAG, msg, tr);
+                return;
+            } catch (Throwable ignored) {
+            }
+        }
+        Log.e(TAG, msg, tr);
+    }
+
+    private static void hookExecutable(Method method, XposedInterface.Hooker hooker) {
+        GBFCacheHook self = INSTANCE;
+        if (self == null || method == null) return;
+        self.hook(method)
+                .setPriority(PRIORITY_DEFAULT)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(hooker);
+    }
     private static final String TAG = "GBFCache";
 
     private static final String CMD_HOST = "gbf-cache.local";
@@ -75,77 +109,73 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
     private static final AtomicBoolean SYNCING = new AtomicBoolean(false);
 
     @Override
-    public void handleLoadPackage(final XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        String pkg = lpparam.packageName;
-        if (pkg == null || !pkg.contains("com.dena")) {
+    public void onModuleLoaded(ModuleLoadedParam param) {
+        INSTANCE = this;
+        if (!HOOKS_INSTALLED.compareAndSet(false, true)) {
             return;
         }
 
-        XposedBridge.log(TAG + ": ========================================");
-        XposedBridge.log(TAG + ": target loaded");
-        XposedBridge.log(TAG + ": pkg     = " + pkg);
-        XposedBridge.log(TAG + ": process = " + lpparam.processName);
-        XposedBridge.log(TAG + ": mode    = internal files dir (no root)");
-        XposedBridge.log(TAG + ": ========================================");
+        xlog("========================================");
+        xlog("target process loaded: " + param.getProcessName());
+        xlog("mode = LibXposed API 102");
+        xlog("========================================");
 
-        Application app = null;
         try {
-            app = android.app.AndroidAppHelper.currentApplication();
-        } catch (Throwable ignored) {
-        }
-
-        if (app == null) {
-            try {
-                XposedHelpers.findAndHookMethod(
-                        "android.app.Application",
-                        lpparam.classLoader,
-                        "onCreate",
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                Application a = (Application) param.thisObject;
-                                setupCacheRoot(a);
-                            }
+            final Method onCreate = Application.class.getDeclaredMethod("onCreate");
+            hookExecutable(onCreate, new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object result = chain.proceed();
+                    try {
+                        Object obj = chain.getThisObject();
+                        if (obj instanceof Application) {
+                            setupCacheRoot((Application) obj);
                         }
-                );
-            } catch (Throwable ignored) {
-            }
-        } else {
-            setupCacheRoot(app);
+                    } catch (Throwable t) {
+                        xlog("Application.onCreate post hook failed", t);
+                    }
+                    return result;
+                }
+            });
+        } catch (Throwable t) {
+            xlog("hook Application.onCreate failed", t);
         }
 
         hookBaseWebViewClient();
 
         try {
-            XposedHelpers.findAndHookMethod(
-                    WebView.class,
-                    "setWebViewClient",
-                    WebViewClient.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            Object client = param.args[0];
-                            if (client == null) {
-                                return;
-                            }
-                            hookClientClass(client.getClass());
+            Method setClient = WebView.class.getDeclaredMethod(
+                    "setWebViewClient", WebViewClient.class);
+            hookExecutable(setClient, new XposedInterface.Hooker() {
+                @Override
+                public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object result = chain.proceed();
+                    try {
+                        if (chain.getArgs() != null && chain.getArgs().size() > 0) {
+                            Object client = chain.getArgs().get(0);
+                            if (client != null) hookClientClass(client.getClass());
                         }
+                    } catch (Throwable t) {
+                        xlog("setWebViewClient post hook failed", t);
                     }
-            );
-        } catch (Throwable ignored) {
+                    return result;
+                }
+            });
+        } catch (Throwable t) {
+            xlog("hook WebView.setWebViewClient failed", t);
         }
     }
 
     private static void setupCacheRoot(Context ctx) {
         try {
-            XposedBridge.log(TAG + ": setupCacheRoot, SDK=" + android.os.Build.VERSION.SDK_INT);
+            xlog(TAG + ": setupCacheRoot, SDK=" + android.os.Build.VERSION.SDK_INT);
 
             File internal = ctx.getFilesDir();
-            XposedBridge.log(TAG + ": getFilesDir = "
+            xlog(TAG + ": getFilesDir = "
                     + (internal == null ? "null" : internal.getAbsolutePath()));
 
             if (internal == null) {
-                XposedBridge.log(TAG + ": getFilesDir null, abort");
+                xlog(TAG + ": getFilesDir null, abort");
                 return;
             }
 
@@ -153,40 +183,36 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
             if (!root.exists()) {
                 boolean ok = root.mkdirs();
                 if (!ok && !root.exists()) {
-                    XposedBridge.log(TAG + ": cannot create cache root, abort");
+                    xlog(TAG + ": cannot create cache root, abort");
                     return;
                 }
             }
 
             CACHE_ROOT = root;
-            XposedBridge.log(TAG + ": cache root ready = " + CACHE_ROOT.getAbsolutePath());
+            xlog(TAG + ": cache root ready = " + CACHE_ROOT.getAbsolutePath());
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": setupCacheRoot failed: " + t);
+            xlog(TAG + ": setupCacheRoot failed: " + t);
         }
     }
 
     private static void hookBaseWebViewClient() {
         try {
-            XposedHelpers.findAndHookMethod(
-                    WebViewClient.class,
-                    "shouldInterceptRequest",
-                    WebView.class,
-                    WebResourceRequest.class,
-                    new InterceptHook()
-            );
-        } catch (Throwable ignored) {
+            Method m = WebViewClient.class.getDeclaredMethod(
+                    "shouldInterceptRequest", WebView.class, WebResourceRequest.class);
+            hookExecutable(m, new InterceptHook());
+            xlog("hooked WebViewClient.shouldInterceptRequest(WebResourceRequest)");
+        } catch (Throwable t) {
+            xlog("hook WebViewClient WebResourceRequest failed", t);
         }
 
         try {
-            XposedHelpers.findAndHookMethod(
-                    WebViewClient.class,
-                    "shouldInterceptRequest",
-                    WebView.class,
-                    String.class,
-                    new InterceptHook()
-            );
-        } catch (Throwable ignored) {
+            Method m = WebViewClient.class.getDeclaredMethod(
+                    "shouldInterceptRequest", WebView.class, String.class);
+            hookExecutable(m, new InterceptHook());
+            xlog("hooked WebViewClient.shouldInterceptRequest(String)");
+        } catch (Throwable t) {
+            xlog("hook WebViewClient String failed", t);
         }
     }
 
@@ -207,42 +233,41 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
             }
             if (p[1] == WebResourceRequest.class || p[1] == String.class) {
                 try {
-                    XposedBridge.hookMethod(method, new InterceptHook());
+                    hookExecutable(method, new InterceptHook());
                 } catch (Throwable ignored) {
                 }
             }
         }
     }
 
-    private static class InterceptHook extends XC_MethodHook {
+    private static class InterceptHook implements XposedInterface.Hooker {
         @Override
-        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-            String url = extractUrl(param.args);
+        public Object intercept(XposedInterface.Chain chain) throws Throwable {
+            List<Object> args = chain.getArgs();
+            Object[] rawArgs = args == null ? null : args.toArray();
+            String url = extractUrl(rawArgs);
             if (url == null) {
-                return;
+                return chain.proceed();
             }
 
-            // 拦截 modified_list.txt：不返回本地内容，让游戏自己走网络
-            // 同时异步处理版本对比 + 缓存整理
+            // modified_list.txt 必须让原 WebView 请求继续执行。
             if (isModifiedListUrl(url)) {
                 handleModifiedListAsync(url);
-                return;
+                return chain.proceed();
             }
 
             if (isCommandHost(url)) {
                 WebResourceResponse r = handleCommand(url);
-                if (r != null) {
-                    param.setResult(r);
-                    return;
-                }
+                if (r != null) return r;
             }
 
             WebResourceResponse response = tryLocalResponse(url);
             if (response != null) {
-                param.setResult(response);
-            } else {
-                scheduleDownload(url);
+                return response;
             }
+
+            scheduleDownload(url);
+            return chain.proceed();
         }
     }
 
@@ -282,7 +307,7 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
                 try {
                     syncFromModifiedList(url);
                 } catch (Throwable t) {
-                    XposedBridge.log(TAG + ": syncFromModifiedList failed: " + t);
+                    xlog(TAG + ": syncFromModifiedList failed: " + t);
                 } finally {
                     SYNCING.set(false);
                 }
@@ -312,7 +337,7 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
             conn.connect();
 
             if (conn.getResponseCode() != 200) {
-                XposedBridge.log(TAG + ": modified_list HTTP " + conn.getResponseCode());
+                xlog(TAG + ": modified_list HTTP " + conn.getResponseCode());
                 return;
             }
 
@@ -329,7 +354,7 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
                 return;
             }
 
-            XposedBridge.log(TAG + ": version changed: " + lastVersion + " -> " + newVersion);
+            xlog(TAG + ": version changed: " + lastVersion + " -> " + newVersion);
 
             Uri uri = Uri.parse(url);
             String host = uri.getHost();
@@ -375,10 +400,10 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
 
             writeVersionFile(newVersion);
 
-            XposedBridge.log(TAG + ": sync done, checked=" + checked + " deleted=" + deleted);
+            xlog(TAG + ": sync done, checked=" + checked + " deleted=" + deleted);
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": syncFromModifiedList error: " + t);
+            xlog(TAG + ": syncFromModifiedList error: " + t);
         } finally {
             try { if (reader != null) reader.close(); } catch (Throwable ignored) {}
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
@@ -430,7 +455,7 @@ public class GBFCacheHook implements IXposedHookLoadPackage {
             fos.write(version.getBytes("UTF-8"));
             fos.flush();
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": writeVersionFile failed: " + t);
+            xlog(TAG + ": writeVersionFile failed: " + t);
         } finally {
             try { if (fos != null) fos.close(); } catch (Throwable ignored) {}
         }

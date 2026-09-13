@@ -6,17 +6,6 @@
         android:description="@string/app_description"
         android:allowBackup="false"
         android:supportsRtl="true">
-
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="GBF 静态资源本地缓存" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="82" />
-
     </application>
 
 </manifest>
