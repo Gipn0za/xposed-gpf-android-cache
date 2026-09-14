@@ -1,134 +1,143 @@
-给SkyLeap浏览器用的 LSPosed 模块，
-把游戏静态资源（图片、音频、JS、CSS）缓存到本地，减少重复下载来加快加载。
+---
 
-基于 libxposed API 102（Modern API），支持 无 root 使用（通过 NPatch / LSPatch 内置进客户端），也支持有 root 的 LSPosed 环境。
+# GBF Cache LSPosed
+
+一个专为 **SkyLeap浏览器** 用的LSPosed 模块。通过本地缓存《碧蓝航线/碧蓝幻想 (GBF)》等游戏静态资源（图片、音频、JS、CSS），显著减少重复网络请求，提升页面加载速度。
+
+基于 **libxposed API 102（Modern API）** 开发，同时支持 Root 环境（LSPosed）与无 Root 环境（NPatch / LSPatch 内嵌）。
 
 ---
 
-功能
+## 目录
 
-· 自动缓存：拦截 WebView 的 shouldInterceptRequest，
-  把命中缓存的请求直接返回本地文件，未命中的走网络并异步下载缓存。
-· 精准缓存范围：
-  · 图片：.png / .jpg / .jpeg / .gif / .webp / .avif / .bmp / .svg
-  · 音频：.mp3 / .ogg / .oga / .wav / .m4a / .aac
-  · 视频：.mp4 / .webm / .m4v
-  · 脚本：.js / .css
-· 多 CDN 支持：内置 GBF 常用 Akamai CDN 域名，
-  以及主站 gbf.game.mbga.jp（只缓存 /assets/ 下的资源，避免误缓存 API）。
-· 热更新自动整理：
-  拦截 modified_list.txt，对比版本号，
-  只删除本次维护后发生变化的图片/音频资源，不清 JS/CSS。
-· 可视化管理页：在游戏内浏览器访问虚拟域名即可查看状态、清理缓存。
-· 分级清理：
-  · 智能整理（基于 modified_list.txt）
-  · 按时间清理（7 天 / 30 天 / 90 天前）
-  · 按类型清理（图片 / 音频 / 视频 / JS / CSS）
-  · 按目录清理（img_low / img / sound 等）
-  · 全部清空
-· 无 root 可用：使用 app 内部私有目录
-  /data/data/<包名>/files/gbf-cache，
-  不依赖外部存储权限，不受分区存储限制。
+* [核心特性](https://www.google.com/search?q=%23%E6%A0%B8%E5%BF%83%E7%89%B9%E6%80%A7)
+* [虚拟管理页](https://www.google.com/search?q=%23%E8%99%9A%E6%8B%9F%E7%AE%A1%E7%90%86%E9%A1%B5)
+* [缓存目录结构](https://www.google.com/search?q=%23%E7%BC%93%E5%AD%98%E7%9B%AE%E5%BD%95%E7%BB%93%E6%9E%84)
+* [热更新处理机制](https://www.google.com/search?q=%23%E7%83%AD%E6%9B%B4%E6%96%B0%E5%A4%84%E7%90%86%E6%9C%BA%E5%88%B6)
+* [安装与部署](https://www.google.com/search?q=%23%E5%AE%89%E8%A3%85%E4%B8%8E%E9%83%A8%E7%BD%B2)
+* [日志说明](https://www.google.com/search?q=%23%E6%97%A5%E5%BF%97%E8%AF%B4%E6%98%8E)
+* [调试指南](https://www.google.com/search?q=%23%E8%B0%83%E8%AF%95%E6%8C%87%E5%8D%97)
+* [编译指南](https://www.google.com/search?q=%23%E7%BC%96%E8%AF%91%E6%8C%87%E5%8D%97)
+* [兼容性说明](https://www.google.com/search?q=%23%E5%85%BC%E5%AE%B9%E6%80%A7%E8%AF%B4%E6%98%8E)
 
 ---
 
-虚拟管理页
+## 核心特性
 
-在游戏内浏览器地址栏输入以下地址即可访问：
+* **自动拦截与缓存**：拦截 WebView 的 `shouldInterceptRequest` 方法。命中缓存则直接返回本地文件，未命中则走网络传输并异步下载补齐缓存。
+* **精准资源覆盖**：
+* **图片**：`.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.avif`, `.bmp`, `.svg`
+* **音频**：`.mp3`, `.ogg`, `.oga`, `.wav`, `.m4a`, `.aac`
+* **视频**：`.mp4`, `.webm`, `.m4v`
+* **脚本/样式**：`.js`, `.css`
 
-地址 说明
-https://gbf-cache.local/status 查看缓存状态（总量、文件数、按来源/类型/目录/时间分布）
-https://gbf-cache.local/clear 清理缓存（分级菜单）
-https://gbf-cache.local/clear?action=sync 手动触发智能整理
-https://gbf-cache.local/ 帮助页
 
-这些域名不是真实存在的，
-所有请求都会被模块在 shouldInterceptRequest 里拦截并返回本地生成的 HTML 页面。
+* **多 CDN 支持**：内置 GBF 常用 Akamai CDN 域名，以及主站 `gbf.game.mbga.jp`（仅拦截 `/assets/` 目录下的静态资源，避免误缓存接口 API）。
+* **热更新智能整理**：自动拦截 `modified_list.txt` 并比对版本号，仅精准清除发生变更的图片/音频资源，不误删附带版本号的 JS/CSS。
+* **内置可视化管理页**：直接在游戏内浏览器访问虚拟域名即可查看缓存状态或进行分级清理。
+* **灵活分级清理**：
+* 智能整理（基于 `modified_list.txt`）
+* 按时间清理（7 天 / 30 天 / 90 天前）
+* 按类型清理（图片 / 音频 / 视频 / JS / CSS）
+* 按目录清理（`img_low`, `img`, `sound` 等）
+* 一键全部清空
+
+
+* **无 Root 友好**：默认使用应用私有目录 `/data/data/<包名>/files/gbf-cache`，不依赖外部存储权限，不受 Android 分区存储（Scoped Storage）限制。
 
 ---
 
-缓存位置
+## 虚拟管理页
 
-缓存目录：/data/data/<SkyLeap 包名>/files/gbf-cache/<host>/<URL 路径>
+在 SkyLeap 地址栏输入以下虚拟地址即可直接访问控制台（所有请求均在本地被模块拦截并渲染 HTML）：
 
-例如：
+| 虚拟 URL | 功能说明 |
+| --- | --- |
+| `https://gbf-cache.local/status` | 查看当前缓存状态（总量、文件数、按来源/类型/目录/时间分布） |
+| `https://gbf-cache.local/clear` | 访问分级清理菜单 |
+| `https://gbf-cache.local/clear?action=sync` | 手动触发智能整理 |
+| `https://gbf-cache.local/` | 查看使用帮助 |
+
+---
+
+## 缓存目录结构
+
+缓存文件保存在应用的内部私有目录中：
+
+```
+/data/data/<SkyLeap包名>/files/gbf-cache/<host>/<URL路径>
+
+```
+
+**示例路径：**
 
 ```
 /data/data/com.dena.skyleap/files/gbf-cache/
-  prd-game-a-granbluefantasy.akamaized.net/
-    assets/
-      img_low/
-        sp/
-          cjs/
-            npc_3040028000_03.png
-  gbf.game.mbga.jp/
-    assets/
-      ...
-```
-
-这是 app 内部私有目录：
-
-· 无 root 用户通过文件管理器看不到。
-· 随 app 卸载自动清理。
-· 不需要任何存储权限。
-
----
-
-热更新处理
-
-GBF 的热更新通过 modified_list.txt 通知客户端哪些资源发生了变化。
-
-模块的处理流程：
-
-1. 拦截 modified_list.txt 请求，不缓存，让游戏自己走网络。
-2. 异步下载同一份 modified_list.txt。
-3. 读取第一行版本号，和本地记录的 .last_version 对比。
-4. 版本号不变：什么都不做。
-5. 版本号变化：遍历列表中每行的路径，
-   只删除本地对应的图片/音频缓存；
-   JS/CSS 因为路径里带版本号，会自动失效，不需要手动删。
-6. 更新 .last_version。
-
-可以在 /clear 或 /status 页面手动触发一次整理。
-
-已知限制
-
-· modified_list.txt 是相对某个基线的变更列表，
-  如果你跨越多个版本，可能只删除"最后一跳"的变化。
-  建议在维护更新后进游戏一次，让模块及时整理。
-· JS/CSS 依赖 URL 里的版本号做失效，不参与 modified_list.txt 的处理。
-
----
-
-安装
-
-方式一：LSPosed（需要 root）
-
-1. 编译模块 APK。
-2. 安装。
-3. 在 LSPosed 管理器中启用模块，勾选作用域：com.dena.skyleap。
-4. 重启 SkyLeap。
-
-方式二：NPatch / LSPatch（无需 root）
-
-1. 编译模块 APK。
-2. 使用 NPatch 或 LSPatch 的便携模式，把模块和 SkyLeap 客户端一起打包。（可能打包的时候 破解签名校验这个选项要选None）
-3. 卸载原版客户端，安装打包后的 APK。
-
-打包后签名会变，需要先卸载原版再安装。
-
----
-
-日志
-
-模块的日志通过 LSPosed 管理器 → 日志 页面查看，
-或用 adb logcat -s GBFCache 过滤。
-
-会输出的日志
-
-模块加载时：
+├── prd-game-a-granbluefantasy.akamaized.net/
+│   └── assets/
+│       └── img_low/
+│           └── sp/
+│               └── cjs/
+│                   └── npc_3040028000_03.png
+└── gbf.game.mbga.jp/
+    └── assets/
+        └── ...
 
 ```
+
+> **私有目录特性：** > 1. 无 Root 用户无需担心权限问题，普通文件管理器不可见。
+> 2. 随 SkyLeap 卸载自动清除，无垃圾残留。
+> 3. 不需要申请额外的动态存储权限。
+
+---
+
+## 热更新处理机制
+
+GBF 通过 `modified_list.txt` 记录资源更新动态，模块的处理逻辑如下：
+
+1. **拦截请求**：拦截 `modified_list.txt` 请求，该请求本身不缓存，透传至网络。
+2. **后台比对**：模块在后台异步下载一份最新的 `modified_list.txt`。
+3. **版本校验**：读取文件首行的版本号，并与本地保存的 `.last_version` 进行比对。
+* **版本一致**：无操作，结束流程。
+* **版本变更**：逐行遍历变更列表，**精准删除本地对应的图片与音频缓存**。
+
+
+4. **失效更新**：JS/CSS 文件因 URL 内带版本号会自动失效，无需额外删除。
+5. **保存记录**：同步更新 `.last_version` 文件。
+
+> **已知限制：**
+> * `modified_list.txt` 是基于某个基线的增量变更列表。如果跨越了多个版本更新，可能仅会触发“最后一跳”的变更清理。建议每次大修维护后登录一次游戏，确保模块及时完成同步。
+> * JS/CSS 依赖 URL 内自带的版本参数失效，不参与 `modified_list.txt` 的增量删改逻辑。
+> 
+> 
+
+---
+
+## 安装与部署
+
+### 方式一：LSPosed 环境（需要 Root）
+
+1. 编译模块产生 APK。
+2. 在设备上安装该 APK。
+3. 打开 **LSPosed 管理器** 启用模块，将作用域勾选为：`com.dena.skyleap`。
+4. 强制停止并重启 SkyLeap。
+
+### 方式二：NPatch / LSPatch 环境（免 Root）
+
+1. 编译模块产生 APK。
+2. 使用 **NPatch** 或 **LSPatch** 的便携模式，将模块 APK 与 SkyLeap 客户端打入同一个安装包。（*注：打包时若遇到签名问题，请尝试将“破解签名校验”选项设为 `None*`）。
+3. 卸载原版 SkyLeap 客户端，安装打包后的新客户端。
+
+---
+
+## 日志说明
+
+可通过 **LSPosed 管理器 → 日志** 或执行命令 `adb logcat -s GBFCache` 查看输出日志。
+
+### 关键控制台输出
+
+* **模块加载与初始化：**
+```text
 ========================================
 target process loaded: com.dena.skyleap
 mode = LibXposed API 102
@@ -138,34 +147,26 @@ GBFCache: getFilesDir = /data/data/com.dena.skyleap/files
 GBFCache: cache root ready = /data/data/com.dena.skyleap/files/gbf-cache
 hooked WebViewClient.shouldInterceptRequest(WebResourceRequest)
 hooked WebViewClient.shouldInterceptRequest(String)
-```
-
-modified_list.txt 版本变化时：
 
 ```
+
+
+* **检测到热更新：**
+```text
 GBFCache: version changed: <旧版本> -> <新版本>
 GBFCache: sync done, checked=<n> deleted=<n>
+
 ```
 
-Hook 注册失败时会有对应 failed 错误日志。
 
-不输出的日志
 
-以下操作默认不打日志：
-
-· 每次资源拦截的命中 / 未命中
-· 每次后台下载的开始 / 成功 / 失败
-· 清理缓存的全过程
-· modified_list.txt 版本未变化时
-
-这是为了避免刷屏和影响游戏性能。如果你在调试缓存是否生效，
-需要临时在这些关键路径上加日志（见下方"调试"一节）。
+> **高频静默说明：** 为降低性能损耗及避免频繁刷屏，每次资源的拦截命中/未命中、后台下载细节以及清空过程默认**不打印日志**。
 
 ---
 
-调试
+## 调试指南
 
-如果怀疑缓存没有生效，可以在 InterceptHook.intercept 中加一行：
+如果需要排查拦截与缓存是否成功生效，可以在 `InterceptHook.intercept` 逻辑中临时注入调试日志：
 
 ```java
 WebResourceResponse response = tryLocalResponse(url);
@@ -176,30 +177,34 @@ if (response != null) {
 xlog("MISS " + url);
 scheduleDownload(url);
 return chain.proceed();
+
 ```
 
-以及把 downloadAndCache 的 catch (Throwable ignored) 改为：
+同时将 `downloadAndCache` 的异常捕获改为输出具体堆栈：
 
 ```java
 } catch (Throwable t) {
     xlog("DL FAIL " + url, t);
 }
+
 ```
 
-调试完成后记得移除，或改为只在 debug 构建里启用。
+*调试完毕后请记得移除上述日志代码，以免影响生产环境性能。*
 
 ---
 
-编译
+## 编译指南
 
-依赖
+### 编译依赖
 
-· Android Studio（建议 Hedgehog 或更新）
-· Android SDK Platform 36
-· Gradle 8.0+
-· libxposed API 102（compileOnly）
+* **Android Studio**（建议 Hedgehog 及以上）
+* **Android SDK Platform**: 36
+* **Gradle**: 8.0+
+* **libxposed API**: 102 (`compileOnly`)
 
-build.gradle
+### 项目配置
+
+#### `build.gradle`
 
 ```groovy
 android {
@@ -223,15 +228,14 @@ android {
 dependencies {
     compileOnly("io.github.libxposed:api:102.0.0")
 }
+
 ```
 
-minSdk 26 是因为 libxposed API 102 使用 Executable 类型的 hook 目标，
-该类型在 Android 8.0（API 26）才引入。
+*注：`minSdk` 设置为 26 是因为 libxposed API 102 使用了 Android 8.0 (API 26) 才引入的 Executable 类型 Hook 目标。*
 
-AndroidManifest.xml
+#### `AndroidManifest.xml`
 
-API 102 不再从 AndroidManifest.xml 读取模块信息，
-所有 <meta-data> 声明均已移除：
+API 102 无需在清单文件配置 `<meta-data>` 标签：
 
 ```xml
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
@@ -241,26 +245,28 @@ API 102 不再从 AndroidManifest.xml 读取模块信息，
         android:allowBackup="false"
         android:supportsRtl="true" />
 </manifest>
-```
-
-META-INF/xposed/
-
-模块元数据统一放在 app/src/main/resources/META-INF/xposed/ 下。
-
-java_init.list（入口类，替代旧版 assets/xposed_init）：
 
 ```
+
+#### `META-INF/xposed/` 配置文件
+
+配置位于 `app/src/main/resources/META-INF/xposed/` 路径下：
+
+* **`java_init.list`** (入口类配置，替代旧版 `assets/xposed_init`):
+```text
 com.frinsecta.gbfcache.GBFCacheHook
-```
-
-scope.list（作用域包名）：
 
 ```
+
+
+* **`scope.list`** (目标作用域包名):
+```text
 com.dena.skyleap
+
 ```
 
-module.prop（模块属性，API 102 必需）：
 
+* **`module.prop`** (API 102 必需模块元数据):
 ```properties
 minApiVersion=102
 targetApiVersion=102
@@ -269,11 +275,14 @@ version=1.0
 versionCode=1
 author=Frinsecta
 description=GBF 静态资源本地缓存
+
 ```
 
-proguard-rules.pro
 
-如果将来开启 minifyEnabled true，需要以下规则保护入口类：
+
+#### `proguard-rules.pro`
+
+若项目开启混淆 (`minifyEnabled true`)，请加入以下规则保留入口类：
 
 ```proguard
 -dontwarn io.github.libxposed.annotation.**
@@ -281,17 +290,17 @@ proguard-rules.pro
 -keep,allowoptimization,allowobfuscation public class * extends io.github.libxposed.api.XposedModule {
     public <init>();
 }
+
 ```
 
 ---
 
-兼容性
+## 兼容性说明
 
-项目 说明
-目标应用 SkyLeap（包名 com.dena.skyleap）
-多开/共存版 支持，包名包含 com.dena 即生效
-Android 版本 8.0+（minSdk 26）
-框架 LSPosed（Modern API 102）/ NPatch / LSPatch
-root 不需要
-
----
+| 项目 | 说明 |
+| --- | --- |
+| **目标应用** | SkyLeap（包名 `com.dena.skyleap`） |
+| **多开/共存版** | 支持（包名匹配 `com.dena` 即可生效） |
+| **系统版本** | Android 8.0+（minSdk 26） |
+| **框架支持** | LSPosed (Modern API 102) / NPatch / LSPatch |
+| **Root 要求** | 非必需（支持免 Root 打包集成） |
