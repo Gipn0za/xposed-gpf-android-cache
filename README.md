@@ -2,7 +2,7 @@
 
 # GBF Cache LSPosed
 
-一个专为 **SkyLeap浏览器** 用的LSPosed 模块。通过本地缓存《碧蓝航线/碧蓝幻想 (GBF)》等游戏静态资源（图片、音频、JS、CSS），显著减少重复网络请求，提升页面加载速度。
+一个专为 **SkyLeap浏览器** 用的LSPosed 模块。通过本地缓存gbf的静态资源（图片、音频、JS、CSS），显著减少重复网络请求，提升页面加载速度。
 
 基于 **libxposed API 102（Modern API）** 开发，同时支持 Root 环境（LSPosed）与无 Root 环境（NPatch / LSPatch 内嵌）。
 
