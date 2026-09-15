@@ -2,7 +2,11 @@ package com.frinsecta.gbfcache;
 
 import android.app.Application;
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.content.pm.PackageInfo;
 import android.net.Uri;
+import android.os.Build;
+import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
@@ -31,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import android.util.Log;
 
@@ -40,6 +45,60 @@ import io.github.libxposed.api.XposedModule;
 public class GBFCacheHook extends XposedModule {
     private static volatile GBFCacheHook INSTANCE;
     private static final AtomicBoolean HOOKS_INSTALLED = new AtomicBoolean(false);
+
+    private static final String TAG = "GBFCache";
+
+    private static final String CMD_HOST = "gbf-cache.local";
+    private static final String PATH_CLEAR = "/clear";
+    private static final String PATH_STATUS = "/status";
+    private static final String PATH_FILES = "/files";
+
+    private static final String MODIFIED_LIST_PATH = "/assets/resources/native/modified_list.txt";
+
+    private static final String PREF_NAME = "gbfcache";
+    private static final String KEY_LAST_VERSION = "last_version";
+    private static final String KEY_LAST_PROPS = "last_props_json";
+    private static final String KEY_LAST_PROPS_TIME = "last_props_time";
+
+    private static final long PROPS_FETCH_MIN_INTERVAL = 60L * 60 * 1000;
+
+    private static final Set<String> GBF_HOSTS;
+    static {
+        Set<String> s = new HashSet<String>();
+        s.add("prd-game-a-granbluefantasy.akamaized.net");
+        s.add("prd-game-a-gbf.akamaized.net");
+        s.add("prd-game-a1-granbluefantasy.akamaized.net");
+        s.add("prd-game-a2-granbluefantasy.akamaized.net");
+        s.add("prd-game-a3-granbluefantasy.akamaized.net");
+        s.add("prd-game-a4-granbluefantasy.akamaized.net");
+        s.add("prd-game-a5-granbluefantasy.akamaized.net");
+        s.add("gbf.game.mbga.jp");
+        s.add("game.granbluefantasy.jp");
+        GBF_HOSTS = Collections.unmodifiableSet(s);
+    }
+
+    private static final Set<String> PAGE_HOSTS;
+    static {
+        Set<String> s = new HashSet<String>();
+        s.add("gbf.game.mbga.jp");
+        s.add("game.granbluefantasy.jp");
+        PAGE_HOSTS = Collections.unmodifiableSet(s);
+    }
+
+    private static volatile File CACHE_ROOT = null;
+    private static volatile SharedPreferences PREFS = null;
+
+    private static final AtomicLong LAST_PROPS_FETCH = new AtomicLong(0);
+
+    private static final Set<String> DOWNLOADING =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+
+    private static final ExecutorService DOWNLOAD_POOL = Executors.newFixedThreadPool(3);
+
+    private static final Set<Class<?>> HOOKED_CLIENT_CLASSES =
+            Collections.synchronizedSet(new HashSet<Class<?>>());
+
+    private static final AtomicBoolean SYNCING = new AtomicBoolean(false);
 
     private static void xlog(String msg) {
         GBFCacheHook self = INSTANCE;
@@ -73,40 +132,6 @@ public class GBFCacheHook extends XposedModule {
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(hooker);
     }
-    private static final String TAG = "GBFCache";
-
-    private static final String CMD_HOST = "gbf-cache.local";
-    private static final String PATH_CLEAR = "/clear";
-    private static final String PATH_STATUS = "/status";
-
-    private static final String MODIFIED_LIST_PATH = "/assets/resources/native/modified_list.txt";
-    private static final String VERSION_FILE_NAME = ".last_version";
-
-    private static final Set<String> GBF_HOSTS;
-    static {
-        Set<String> s = new HashSet<String>();
-        s.add("prd-game-a-granbluefantasy.akamaized.net");
-        s.add("prd-game-a-gbf.akamaized.net");
-        s.add("prd-game-a1-granbluefantasy.akamaized.net");
-        s.add("prd-game-a2-granbluefantasy.akamaized.net");
-        s.add("prd-game-a3-granbluefantasy.akamaized.net");
-        s.add("prd-game-a4-granbluefantasy.akamaized.net");
-        s.add("prd-game-a5-granbluefantasy.akamaized.net");
-        s.add("gbf.game.mbga.jp");
-        GBF_HOSTS = Collections.unmodifiableSet(s);
-    }
-
-    private static volatile File CACHE_ROOT = null;
-
-    private static final Set<String> DOWNLOADING =
-            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
-
-    private static final ExecutorService DOWNLOAD_POOL = Executors.newFixedThreadPool(3);
-
-    private static final Set<Class<?>> HOOKED_CLIENT_CLASSES =
-            Collections.synchronizedSet(new HashSet<Class<?>>());
-
-    private static final AtomicBoolean SYNCING = new AtomicBoolean(false);
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
@@ -168,14 +193,11 @@ public class GBFCacheHook extends XposedModule {
 
     private static void setupCacheRoot(Context ctx) {
         try {
-            xlog(TAG + ": setupCacheRoot, SDK=" + android.os.Build.VERSION.SDK_INT);
+            xlog("setupCacheRoot, SDK=" + Build.VERSION.SDK_INT);
 
             File internal = ctx.getFilesDir();
-            xlog(TAG + ": getFilesDir = "
-                    + (internal == null ? "null" : internal.getAbsolutePath()));
-
             if (internal == null) {
-                xlog(TAG + ": getFilesDir null, abort");
+                xlog("getFilesDir null, abort");
                 return;
             }
 
@@ -183,17 +205,32 @@ public class GBFCacheHook extends XposedModule {
             if (!root.exists()) {
                 boolean ok = root.mkdirs();
                 if (!ok && !root.exists()) {
-                    xlog(TAG + ": cannot create cache root, abort");
+                    xlog("cannot create cache root, abort");
                     return;
                 }
             }
 
             CACHE_ROOT = root;
-            xlog(TAG + ": cache root ready = " + CACHE_ROOT.getAbsolutePath());
-
+            PREFS = ctx.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE);
+            xlog("cache root ready = " + CACHE_ROOT.getAbsolutePath());
         } catch (Throwable t) {
-            xlog(TAG + ": setupCacheRoot failed: " + t);
+            xlog("setupCacheRoot failed", t);
         }
+    }
+
+    private static String readVersion() {
+        if (PREFS == null) return null;
+        return PREFS.getString(KEY_LAST_VERSION, null);
+    }
+
+    private static void writeVersion(String version) {
+        if (PREFS == null || version == null) return;
+        PREFS.edit().putString(KEY_LAST_VERSION, version).apply();
+    }
+
+    private static String readLastProps() {
+        if (PREFS == null) return null;
+        return PREFS.getString(KEY_LAST_PROPS, null);
     }
 
     private static void hookBaseWebViewClient() {
@@ -250,7 +287,10 @@ public class GBFCacheHook extends XposedModule {
                 return chain.proceed();
             }
 
-            // modified_list.txt 必须让原 WebView 请求继续执行。
+            if (isGamePageUrl(url)) {
+                maybeFetchServerProps(url);
+            }
+
             if (isModifiedListUrl(url)) {
                 handleModifiedListAsync(url);
                 return chain.proceed();
@@ -286,6 +326,170 @@ public class GBFCacheHook extends XposedModule {
         return null;
     }
 
+    // ================== 游戏版本探测 ==================
+
+    private static boolean isGamePageUrl(String url) {
+        if (url == null) return false;
+        try {
+            Uri uri = Uri.parse(url);
+            String host = uri.getHost();
+            if (host == null || !PAGE_HOSTS.contains(host.toLowerCase())) return false;
+            String path = uri.getPath();
+            if (path == null || path.length() == 0) return true;
+            if (path.equals("/")) return true;
+            return !path.contains(".");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void maybeFetchServerProps(String url) {
+        long now = System.currentTimeMillis();
+        long last = LAST_PROPS_FETCH.get();
+        if (now - last < PROPS_FETCH_MIN_INTERVAL) return;
+        if (!LAST_PROPS_FETCH.compareAndSet(last, now)) return;
+
+        final String pageUrl = url;
+        DOWNLOAD_POOL.execute(new Runnable() {
+            @Override
+            public void run() {
+                fetchServerProps(pageUrl);
+            }
+        });
+    }
+
+    private static void fetchServerProps(String pageUrl) {
+        HttpURLConnection conn = null;
+        InputStream in = null;
+        BufferedReader reader = null;
+        try {
+            URL u = new URL(pageUrl);
+            conn = (HttpURLConnection) u.openConnection();
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(30000);
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept-Encoding", "identity");
+            conn.setRequestProperty("Referer", pageUrl);
+
+            String cookie = CookieManager.getInstance().getCookie(pageUrl);
+            if (cookie != null) conn.setRequestProperty("Cookie", cookie);
+
+            conn.connect();
+            if (conn.getResponseCode() != 200) {
+                xlog("fetchServerProps HTTP " + conn.getResponseCode());
+                return;
+            }
+
+            in = conn.getInputStream();
+            reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
+
+            StringBuilder sb = new StringBuilder();
+            String line;
+            int lines = 0;
+            while ((line = reader.readLine()) != null && lines++ < 2000) {
+                sb.append(line).append('\n');
+                if (sb.indexOf("server-props") >= 0 && sb.indexOf("\"version\"") >= 0) {
+                    ServerProps p = extractServerProps(sb.toString());
+                    if (p != null && p.version != null) {
+                        onVersionDetected(p);
+                        return;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            xlog("fetchServerProps failed", t);
+        } finally {
+            try { if (reader != null) reader.close(); } catch (Throwable ignored) {}
+            try { if (in != null) in.close(); } catch (Throwable ignored) {}
+            try { if (conn != null) conn.disconnect(); } catch (Throwable ignored) {}
+        }
+    }
+
+    private static class ServerProps {
+        String version;
+        String jsUri;
+        String cssUri;
+        String imgUri;
+    }
+
+    private static ServerProps extractServerProps(String html) {
+        int propsIdx = html.indexOf("server-props");
+        if (propsIdx < 0) return null;
+
+        ServerProps p = new ServerProps();
+        p.version = extractJsonString(html, propsIdx, "\"version\"");
+        p.jsUri = extractJsonString(html, propsIdx, "\"jsUri\"");
+        p.cssUri = extractJsonString(html, propsIdx, "\"cssUri\"");
+        p.imgUri = extractJsonString(html, propsIdx, "\"imgUri\"");
+
+        if (p.version == null) return null;
+        return p;
+    }
+
+    private static String extractJsonString(String html, int fromIdx, String key) {
+        int keyIdx = html.indexOf(key, fromIdx);
+        if (keyIdx < 0) return null;
+        int colon = html.indexOf(':', keyIdx + key.length());
+        if (colon < 0) return null;
+        int q1 = html.indexOf('"', colon);
+        if (q1 < 0) return null;
+        int q2 = html.indexOf('"', q1 + 1);
+        if (q2 < 0) return null;
+        return html.substring(q1 + 1, q2);
+    }
+
+    private static void onVersionDetected(ServerProps p) {
+        if (PREFS != null) {
+            PREFS.edit()
+                    .putString(KEY_LAST_PROPS, "v=" + p.version + " js=" + p.jsUri
+                            + " css=" + p.cssUri + " img=" + p.imgUri)
+                    .putLong(KEY_LAST_PROPS_TIME, System.currentTimeMillis())
+                    .apply();
+        }
+
+        String oldVersion = readVersion();
+        if (p.version.equals(oldVersion)) return;
+
+        xlog("version changed: " + oldVersion + " -> " + p.version);
+        writeVersion(p.version);
+        cleanupOldVersionDirs(p.version);
+    }
+
+    private static void cleanupOldVersionDirs(final String currentVersion) {
+        if (CACHE_ROOT == null) return;
+        File[] hosts = CACHE_ROOT.listFiles();
+        if (hosts == null) return;
+
+        for (File host : hosts) {
+            if (!host.isDirectory()) continue;
+            File assets = new File(host, "assets");
+            if (!assets.isDirectory()) continue;
+
+            File[] dirs = assets.listFiles();
+            if (dirs == null) continue;
+
+            for (File d : dirs) {
+                if (!d.isDirectory()) continue;
+                if (!d.getName().matches("\\d+")) continue;
+                if (d.getName().equals(currentVersion)) continue;
+                xlog("cleanup old version dir: " + d.getAbsolutePath());
+                deleteRecursive(d);
+            }
+        }
+        removeEmptyDirs(CACHE_ROOT);
+    }
+
+    private static void deleteRecursive(File f) {
+        if (f == null) return;
+        if (f.isDirectory()) {
+            File[] children = f.listFiles();
+            if (children != null) {
+                for (File c : children) deleteRecursive(c);
+            }
+        }
+        safeDelete(f);
+    }
+
     // ================== modified_list 同步 ==================
 
     private static boolean isModifiedListUrl(String url) {
@@ -307,7 +511,7 @@ public class GBFCacheHook extends XposedModule {
                 try {
                     syncFromModifiedList(url);
                 } catch (Throwable t) {
-                    xlog(TAG + ": syncFromModifiedList failed: " + t);
+                    xlog("syncFromModifiedList failed: " + t);
                 } finally {
                     SYNCING.set(false);
                 }
@@ -316,7 +520,8 @@ public class GBFCacheHook extends XposedModule {
     }
 
     /*
-     * 下载 modified_list.txt，对比版本号，删除本地对应文件。
+     * 下载 modified_list.txt，全量遍历并删除本地命中的资源。
+     * 版本判断交给 server-props 探测，这里不再做版本对比。
      */
     private static void syncFromModifiedList(String url) {
         if (CACHE_ROOT == null) return;
@@ -337,37 +542,25 @@ public class GBFCacheHook extends XposedModule {
             conn.connect();
 
             if (conn.getResponseCode() != 200) {
-                xlog(TAG + ": modified_list HTTP " + conn.getResponseCode());
+                xlog("modified_list HTTP " + conn.getResponseCode());
                 return;
             }
-
-            in = conn.getInputStream();
-            reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
-
-            String versionLine = reader.readLine();
-            if (versionLine == null) return;
-
-            String newVersion = versionLine.trim();
-            String lastVersion = readVersionFile();
-
-            if (newVersion.equals(lastVersion)) {
-                return;
-            }
-
-            xlog(TAG + ": version changed: " + lastVersion + " -> " + newVersion);
 
             Uri uri = Uri.parse(url);
             String host = uri.getHost();
             if (host == null || !isGBFHost(host)) return;
 
-            // 缓存 CACHE_ROOT 的 canonical path，避免循环里重复计算
-            String cacheRootCanonical = CACHE_ROOT.getCanonicalPath();
+            in = conn.getInputStream();
+            reader = new BufferedReader(new InputStreamReader(in, "UTF-8"));
 
+            String cacheRootCanonical = CACHE_ROOT.getCanonicalPath();
             int deleted = 0;
             int checked = 0;
-
             String line;
+            boolean firstLine = true;
+
             while ((line = reader.readLine()) != null) {
+                if (firstLine) { firstLine = false; continue; }
                 line = line.trim();
                 if (line.isEmpty()) continue;
 
@@ -375,35 +568,22 @@ public class GBFCacheHook extends XposedModule {
                 if (comma <= 0) continue;
 
                 String relPath = line.substring(0, comma);
-
                 if (relPath.startsWith("assets/")) {
                     relPath = relPath.substring("assets/".length());
                 }
-
                 String path = "/assets/" + relPath;
-
-                // 只处理图片/音频。JS/CSS 路径带版本号，会自动失效，不用管。
-                if (!isCacheableAsset(host, path)) {
-                    continue;
-                }
+                if (!isCacheableAsset(host, path)) continue;
 
                 File file = buildLocalFileFast(host, path, cacheRootCanonical);
                 if (file == null) continue;
 
                 checked++;
-                if (file.isFile()) {
-                    if (safeDelete(file)) {
-                        deleted++;
-                    }
-                }
+                if (file.isFile() && safeDelete(file)) deleted++;
             }
 
-            writeVersionFile(newVersion);
-
-            xlog(TAG + ": sync done, checked=" + checked + " deleted=" + deleted);
-
+            xlog("modified_list sync: checked=" + checked + " deleted=" + deleted);
         } catch (Throwable t) {
-            xlog(TAG + ": syncFromModifiedList error: " + t);
+            xlog("syncFromModifiedList error", t);
         } finally {
             try { if (reader != null) reader.close(); } catch (Throwable ignored) {}
             try { if (in != null) in.close(); } catch (Throwable ignored) {}
@@ -426,41 +606,6 @@ public class GBFCacheHook extends XposedModule {
         }
     }
 
-    private static String readVersionFile() {
-        if (CACHE_ROOT == null) return null;
-        File f = new File(CACHE_ROOT, VERSION_FILE_NAME);
-        if (!f.isFile()) return null;
-        FileInputStream fis = null;
-        try {
-            fis = new FileInputStream(f);
-            long len = f.length();
-            if (len <= 0 || len > 1024) return null;
-            byte[] buf = new byte[(int) len];
-            int n = fis.read(buf);
-            if (n <= 0) return null;
-            return new String(buf, 0, n, "UTF-8").trim();
-        } catch (Throwable t) {
-            return null;
-        } finally {
-            try { if (fis != null) fis.close(); } catch (Throwable ignored) {}
-        }
-    }
-
-    private static void writeVersionFile(String version) {
-        if (CACHE_ROOT == null) return;
-        File f = new File(CACHE_ROOT, VERSION_FILE_NAME);
-        FileOutputStream fos = null;
-        try {
-            fos = new FileOutputStream(f);
-            fos.write(version.getBytes("UTF-8"));
-            fos.flush();
-        } catch (Throwable t) {
-            xlog(TAG + ": writeVersionFile failed: " + t);
-        } finally {
-            try { if (fos != null) fos.close(); } catch (Throwable ignored) {}
-        }
-    }
-
     /*
      * 手动整理。从 /clear?action=sync 触发。
      * 返回处理结果描述字符串。
@@ -473,20 +618,19 @@ public class GBFCacheHook extends XposedModule {
                 + MODIFIED_LIST_PATH;
 
         try {
-            int beforeDeleted = countFiles();
+            int beforeCount = countFiles();
             long beforeSize = getCacheSize();
             syncFromModifiedList(url);
-            int afterDeleted = countFiles();
+            int afterCount = countFiles();
             long afterSize = getCacheSize();
 
-            int diffCount = beforeDeleted - afterDeleted;
-            long diffSize = beforeSize - afterSize;
+            int deletedCount = beforeCount - afterCount;
+            long freedSize = beforeSize - afterSize;
 
-            if (diffCount <= 0 && diffSize <= 0) {
-                return "已是最新版本，无需整理";
+            if (deletedCount <= 0 && freedSize <= 0) {
+                return "整理完成，本次无需删除";
             }
-
-            return "整理完成：删除 " + diffCount + " 个文件，释放 " + fmtMB(diffSize);
+            return "整理完成：删除 " + deletedCount + " 个文件，释放 " + fmtMB(freedSize);
 
         } catch (Throwable t) {
             return "整理失败: " + t;
@@ -512,8 +656,21 @@ public class GBFCacheHook extends XposedModule {
             if (PATH_CLEAR.equals(path)) {
                 String action = uri.getQueryParameter("action");
                 if ("sync".equals(action)) {
-                    String result = manualSync();
-                    return pageSyncResult(result);
+                    return pageSyncResult(manualSync());
+                }
+
+                String version = uri.getQueryParameter("version");
+                String quality = uri.getQueryParameter("quality");
+                String confirm = uri.getQueryParameter("confirm");
+
+                if (version != null && !version.matches("\\d+")) version = null;
+                if (quality != null && !isValidQuality(quality)) quality = null;
+
+                if ("1".equals(confirm) && (version != null || quality != null)) {
+                    long before = getCacheSize();
+                    purgeByVersionQuality(version, quality);
+                    long freed = before - getCacheSize();
+                    return pageDone(freed, getCacheSize());
                 }
 
                 String host = uri.getQueryParameter("host");
@@ -521,11 +678,14 @@ public class GBFCacheHook extends XposedModule {
                 String dir = uri.getQueryParameter("dir");
                 String older = uri.getQueryParameter("older");
                 String all = uri.getQueryParameter("all");
-                String confirm = uri.getQueryParameter("confirm");
 
                 if ("1".equals(confirm)) {
                     long freed = purgeByFilter(host, type, dir, older, all);
                     return pageDone(freed, getCacheSize());
+                }
+
+                if (version != null || quality != null) {
+                    return pageConfirmVersionPurge(version, quality);
                 }
 
                 if (host != null || type != null || dir != null
@@ -540,11 +700,87 @@ public class GBFCacheHook extends XposedModule {
                 return pageStatus();
             }
 
-            return pageHelp();
+            if (PATH_FILES.equals(path)) {
+                String relPath = uri.getQueryParameter("path");
+                String action = uri.getQueryParameter("action");
+                String confirm = uri.getQueryParameter("confirm");
 
+                if ("delete".equals(action) && "1".equals(confirm) && relPath != null) {
+                    return handleFileDelete(relPath);
+                }
+                return pageFiles(relPath);
+            }
+
+            return pageHelp();
         } catch (Throwable t) {
             return pageSimple("错误", "处理失败", String.valueOf(t));
         }
+    }
+
+    private static boolean isValidQuality(String q) {
+        return "img_low".equals(q) || "img_mid".equals(q) || "img".equals(q)
+                || "css_low".equals(q) || "css_mid".equals(q) || "css".equals(q)
+                || "js".equals(q);
+    }
+
+    private static long purgeByVersionQuality(String version, String quality) {
+        if (CACHE_ROOT == null) return 0;
+
+        String v = (version != null) ? version : readVersion();
+        long freed = 0;
+
+        File[] hosts = CACHE_ROOT.listFiles();
+        if (hosts == null) return freed;
+
+        for (File host : hosts) {
+            if (!host.isDirectory()) continue;
+            File assets = new File(host, "assets");
+            if (!assets.isDirectory()) continue;
+
+            if (quality == null || quality.startsWith("img")) {
+                String[] imgDirs = quality == null
+                        ? new String[]{"img_low", "img_mid", "img"}
+                        : new String[]{quality};
+                for (String q : imgDirs) {
+                    File dir = new File(assets, q);
+                    if (dir.isDirectory()) {
+                        freed += dirSize(dir);
+                        deleteRecursive(dir);
+                    }
+                }
+            }
+
+            if (quality == null || quality.startsWith("css") || "js".equals(quality)) {
+                if (v != null) {
+                    File vdir = new File(assets, v);
+                    if (vdir.isDirectory()) {
+                        String[] subDirs = quality == null
+                                ? new String[]{"css_low", "css_mid", "css", "js"}
+                                : new String[]{quality};
+                        for (String q : subDirs) {
+                            File dir = new File(vdir, q);
+                            if (dir.isDirectory()) {
+                                freed += dirSize(dir);
+                                deleteRecursive(dir);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        removeEmptyDirs(CACHE_ROOT);
+        return freed;
+    }
+
+    private static long dirSize(File dir) {
+        if (dir == null) return 0;
+        if (dir.isFile()) return dir.length();
+        if (!dir.isDirectory()) return 0;
+        long total = 0;
+        File[] children = dir.listFiles();
+        if (children == null) return 0;
+        for (File f : children) total += dirSize(f);
+        return total;
     }
 
     // ================== 数据统计 ==================
@@ -721,8 +957,69 @@ public class GBFCacheHook extends XposedModule {
                 .append(CMD_HOST).append(PATH_CLEAR).append("?action=sync\">整理缓存</a>")
                 .append("<a class=\"btn btn-danger\" href=\"https://")
                 .append(CMD_HOST).append(PATH_CLEAR).append("\">清理缓存</a>")
+                .append("<a class=\"btn\" href=\"https://")
+                .append(CMD_HOST).append(PATH_FILES).append("\">文件管理</a>")
                 .append("</div>");
 
+        // 游戏信息
+        String lastProps = readLastProps();
+        String currentVersion = readVersion();
+        if (currentVersion != null || lastProps != null) {
+            html.append("<div class=\"card\"><h2>游戏信息</h2>");
+            if (currentVersion != null) {
+                html.append("<div class=\"row\"><span class=\"key\">当前版本</span>")
+                        .append("<span class=\"val\">").append(esc(currentVersion))
+                        .append("</span></div>");
+            }
+            if (lastProps != null) {
+                html.append("<div class=\"row\" style=\"display:block;\">")
+                        .append("<span class=\"key\">资源路径</span>")
+                        .append("<div style=\"color:#c0c0d0;font-size:11px;")
+                        .append("word-break:break-all;margin-top:4px;\">")
+                        .append(esc(lastProps)).append("</div></div>");
+            }
+            if (PREFS != null) {
+                long t = PREFS.getLong(KEY_LAST_PROPS_TIME, 0);
+                if (t > 0) {
+                    html.append("<div class=\"row\"><span class=\"key\">探测时间</span>")
+                            .append("<span class=\"val\">")
+                            .append(android.text.format.DateFormat.format(
+                                    "yyyy-MM-dd HH:mm", t))
+                            .append("</span></div>");
+                }
+            }
+            html.append("</div>");
+        }
+
+        // 设备信息
+        html.append("<div class=\"card\"><h2>设备信息</h2>")
+                .append("<div class=\"row\"><span class=\"key\">Android</span>")
+                .append("<span class=\"val\">").append(esc(Build.VERSION.RELEASE))
+                .append(" (API ").append(Build.VERSION.SDK_INT).append(")</span></div>")
+                .append("<div class=\"row\"><span class=\"key\">设备</span>")
+                .append("<span class=\"val\">").append(esc(Build.MANUFACTURER))
+                .append(" ").append(esc(Build.MODEL)).append("</span></div>");
+
+        String wvPkg = "";
+        try {
+            PackageInfo pi = WebView.getCurrentWebViewPackage();
+            if (pi != null) wvPkg = pi.versionName;
+        } catch (Throwable ignored) {}
+        if (!wvPkg.isEmpty()) {
+            html.append("<div class=\"row\"><span class=\"key\">WebView</span>")
+                    .append("<span class=\"val\">").append(esc(wvPkg)).append("</span></div>");
+        }
+
+        if (CACHE_ROOT != null) {
+            long free = CACHE_ROOT.getUsableSpace();
+            long total = CACHE_ROOT.getTotalSpace();
+            html.append("<div class=\"row\"><span class=\"key\">可用空间</span>")
+                    .append("<span class=\"val\">").append(fmtMB(free))
+                    .append(" / ").append(fmtMB(total)).append("</span></div>");
+        }
+        html.append("</div>");
+
+        // 原有统计
         if (!s.byHost.isEmpty()) {
             html.append("<div class=\"card\"><h2>按 CDN 来源</h2>");
             for (Map.Entry<String, long[]> e : s.byHost.entrySet()) {
@@ -778,7 +1075,9 @@ public class GBFCacheHook extends XposedModule {
     }
 
     private static WebResourceResponse pageClearMenu() {
-        Stats s = computeStats();
+        String currentVersion = readVersion();
+        Map<String, long[]> cur = computeCurrentVersionStats();
+        Map<String, Long> old = computeOldVersionStats();
 
         StringBuilder html = new StringBuilder();
         html.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
@@ -789,65 +1088,285 @@ public class GBFCacheHook extends XposedModule {
         html.append("<div class=\"card\">")
                 .append("<h1>清理缓存</h1>")
                 .append("<div style=\"color:#a0a0b0;font-size:13px;\">")
-                .append("当前 ").append(fmtMB(s.totalSize))
-                .append(" · ").append(s.totalFiles).append(" 个文件")
+                .append("当前版本 ")
+                .append(currentVersion == null
+                        ? "(未知)"
+                        : esc(formatVersionTimestamp(currentVersion)))
+                .append(currentVersion == null
+                        ? ""
+                        : "<span style=\"color:#555;font-size:11px;margin-left:6px;\">("
+                          + esc(currentVersion) + ")</span>")
                 .append("</div></div>");
 
-        // 智能整理
-        html.append("<div class=\"card\"><h2>智能整理</h2>")
-                .append("<p style=\"color:#a0a0b0;font-size:13px;line-height:1.6;margin:0 0 12px 0;\">")
-                .append("下载最新的 modified_list.txt，只删除游戏热更新后变化的资源。")
-                .append("比全量清空更快、更省流量。</p>")
-                .append("<a class=\"btn btn-warn\" href=\"https://")
-                .append(CMD_HOST).append(PATH_CLEAR).append("?action=sync\">")
-                .append("整理缓存</a>")
-                .append("</div>");
-
-        // 按时间清理
-        html.append("<div class=\"card\"><h2>按时间</h2>")
-                .append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
-                .append("?older=7\">清理 7 天前的（")
-                .append(fmtMB(s.recent30d + s.older30d)).append("）</a>")
-                .append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
-                .append("?older=30\">清理 30 天前的（")
-                .append(fmtMB(s.older30d)).append("）</a>")
-                .append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
-                .append("?older=90\">清理 90 天前的</a>")
-                .append("</div>");
-
-        // 按类型清理
-        html.append("<div class=\"card\"><h2>按类型</h2>");
-        for (Map.Entry<String, long[]> e : s.byType.entrySet()) {
-            html.append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
-                    .append("?type=").append(esc(e.getKey()))
-                    .append("\">清理 ").append(esc(e.getKey()))
-                    .append("（").append(fmtMB(e.getValue()[0])).append("）</a>");
-        }
+        html.append("<div class=\"card\"><h2>当前版本 · 按画质</h2>");
+        appendQualityRow(html, "img_low", "图片-低", cur.get("img_low"), currentVersion);
+        appendQualityRow(html, "img_mid", "图片-中", cur.get("img_mid"), currentVersion);
+        appendQualityRow(html, "img", "图片-高", cur.get("img"), currentVersion);
+        appendQualityRow(html, "css_low", "CSS-低", cur.get("css_low"), currentVersion);
+        appendQualityRow(html, "css_mid", "CSS-中", cur.get("css_mid"), currentVersion);
+        appendQualityRow(html, "css", "CSS-高", cur.get("css"), currentVersion);
+        appendQualityRow(html, "js", "JS", cur.get("js"), currentVersion);
         html.append("</div>");
 
-        // 按目录清理
-        if (!s.byDir.isEmpty()) {
-            html.append("<div class=\"card\"><h2>按目录</h2>");
-            for (Map.Entry<String, long[]> e : s.byDir.entrySet()) {
-                html.append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
-                        .append("?dir=").append(esc(e.getKey()))
-                        .append("\">清理 /").append(esc(e.getKey()))
-                        .append("（").append(fmtMB(e.getValue()[0])).append("）</a>");
+        // 版本列表（含当前版本），按时间戳降序，最新在最上面
+        Map<String, Long> allVersions = computeAllVersionStats();
+        if (!allVersions.isEmpty()) {
+            List<Map.Entry<String, Long>> versionList =
+                    new ArrayList<Map.Entry<String, Long>>(allVersions.entrySet());
+            Collections.sort(versionList, new java.util.Comparator<Map.Entry<String, Long>>() {
+                @Override
+                public int compare(Map.Entry<String, Long> a, Map.Entry<String, Long> b) {
+                    return b.getKey().compareTo(a.getKey());
+                }
+            });
+
+            html.append("<div class=\"card\"><h2>版本</h2>");
+            boolean isFirst = true;
+            for (Map.Entry<String, Long> e : versionList) {
+                String vk = e.getKey();
+                String readable = formatVersionTimestamp(vk);
+                boolean isCurrent = vk.equals(currentVersion);
+
+                if (isFirst) {
+                    html.append("<div style=\"color:#4ade80;font-size:11px;")
+                            .append("font-weight:600;letter-spacing:0.5px;")
+                            .append("margin:12px 0 6px 2px;\">目前最新版本</div>");
+                }
+
+                String extraStyle = isCurrent
+                        ? "background:#16281e;border:1px solid #2a4a35;"
+                        : "";
+
+                html.append("<a class=\"btn\" style=\"display:block;text-align:left;")
+                        .append(extraStyle).append("\" href=\"https://")
+                        .append(CMD_HOST).append(PATH_CLEAR)
+                        .append("?version=").append(esc(vk)).append("\">")
+                        .append("<span style=\"display:block;font-size:13px;")
+                        .append(isCurrent ? "color:#4ade80;" : "color:#e8e8f0;")
+                        .append("\">").append(esc(readable)).append("</span>")
+                        .append("<span style=\"display:block;color:#888;font-size:11px;")
+                        .append("font-weight:400;margin-top:3px;\">")
+                        .append(fmtMB(e.getValue()))
+                        .append("</span>")
+                        .append("</a>");
+
+                isFirst = false;
             }
             html.append("</div>");
         }
 
-        // 全部清空
+        html.append("<div class=\"card\"><h2>按时间</h2>")
+                .append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
+                .append("?older=30\">清理 30 天前的</a>")
+                .append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
+                .append("?older=90\">清理 90 天前的</a>")
+                .append("</div>");
+
         html.append("<div class=\"card\"><h2>全部清空</h2>")
                 .append("<a class=\"btn btn-danger\" href=\"https://")
-                .append(CMD_HOST).append(PATH_CLEAR)
-                .append("?all=1\">清空全部缓存</a>")
+                .append(CMD_HOST).append(PATH_CLEAR).append("?all=1\">清空全部缓存</a>")
+                .append("</div>");
+
+        // 不起眼的整理入口
+        html.append("<div style=\"text-align:center;margin-top:20px;\">")
+                .append("<a href=\"https://").append(CMD_HOST).append(PATH_CLEAR)
+                .append("?action=sync\" style=\"color:#555;font-size:11px;")
+                .append("text-decoration:none;\">整理缓存（修正老资源结构，一般不需要）</a>")
                 .append("</div>");
 
         html.append("<div class=\"footer\">GBF Cache Hook</div>")
                 .append("</body></html>");
 
         return htmlResponse(html.toString());
+    }
+
+    private static void appendQualityRow(StringBuilder html, String quality,
+                                         String label, long[] stat, String version) {
+        if (stat == null) stat = new long[]{0, 0};
+        String href = "https://" + CMD_HOST + PATH_CLEAR
+                + "?quality=" + quality
+                + (version != null ? "&version=" + version : "");
+        html.append("<a class=\"btn\" style=\"display:flex;justify-content:space-between;"
+                        + "text-align:left;\" href=\"").append(href).append("\">")
+                .append("<span>").append(esc(label)).append("</span>")
+                .append("<span style=\"color:#a0a0b0;\">").append(fmtMB(stat[0]))
+                .append(" · ").append(stat[1]).append(" 个</span>")
+                .append("</a>");
+    }
+
+    private static Map<String, long[]> computeCurrentVersionStats() {
+        Map<String, long[]> stats = new LinkedHashMap<String, long[]>();
+        String[] qualities = {"img_low", "img_mid", "img", "css_low", "css_mid", "css", "js"};
+        for (String q : qualities) stats.put(q, new long[]{0L, 0L});
+
+        if (CACHE_ROOT == null) return stats;
+        String currentVersion = readVersion();
+
+        File[] hosts = CACHE_ROOT.listFiles();
+        if (hosts == null) return stats;
+
+        for (File host : hosts) {
+            if (!host.isDirectory()) continue;
+            File assets = new File(host, "assets");
+            if (!assets.isDirectory()) continue;
+
+            for (String q : new String[]{"img_low", "img_mid", "img"}) {
+                File dir = new File(assets, q);
+                if (dir.isDirectory()) addDirStats(dir, stats.get(q));
+            }
+            if (currentVersion != null) {
+                File vdir = new File(assets, currentVersion);
+                if (vdir.isDirectory()) {
+                    for (String q : new String[]{"css_low", "css_mid", "css", "js"}) {
+                        File dir = new File(vdir, q);
+                        if (dir.isDirectory()) addDirStats(dir, stats.get(q));
+                    }
+                }
+            }
+        }
+        return stats;
+    }
+
+    private static void addDirStats(File dir, long[] out) {
+        if (dir == null || out == null || !dir.isDirectory()) return;
+        File[] children = dir.listFiles();
+        if (children == null) return;
+        for (File f : children) {
+            if (f.isDirectory()) addDirStats(f, out);
+            else if (f.isFile()) { out[0] += f.length(); out[1]++; }
+        }
+    }
+
+    private static Map<String, Long> computeOldVersionStats() {
+        Map<String, Long> out = new LinkedHashMap<String, Long>();
+        if (CACHE_ROOT == null) return out;
+        String currentVersion = readVersion();
+
+        File[] hosts = CACHE_ROOT.listFiles();
+        if (hosts == null) return out;
+
+        for (File host : hosts) {
+            if (!host.isDirectory()) continue;
+            File assets = new File(host, "assets");
+            if (!assets.isDirectory()) continue;
+            File[] dirs = assets.listFiles();
+            if (dirs == null) continue;
+            for (File d : dirs) {
+                if (!d.isDirectory()) continue;
+                String name = d.getName();
+                if (!name.matches("\\d+")) continue;
+                if (name.equals(currentVersion)) continue;
+                Long prev = out.get(name);
+                long size = dirSize(d);
+                out.put(name, (prev == null ? 0L : prev) + size);
+            }
+        }
+        return out;
+    }
+
+    /*
+     * 返回所有版本目录（含当前版本）的总大小。
+     * key 为版本号字符串，value 为字节数。
+     */
+    private static Map<String, Long> computeAllVersionStats() {
+        Map<String, Long> out = new LinkedHashMap<String, Long>();
+        if (CACHE_ROOT == null) return out;
+
+        File[] hosts = CACHE_ROOT.listFiles();
+        if (hosts == null) return out;
+
+        for (File host : hosts) {
+            if (!host.isDirectory()) continue;
+            File assets = new File(host, "assets");
+            if (!assets.isDirectory()) continue;
+            File[] dirs = assets.listFiles();
+            if (dirs == null) continue;
+            for (File d : dirs) {
+                if (!d.isDirectory()) continue;
+                String name = d.getName();
+                if (!name.matches("\\d+")) continue;
+                Long prev = out.get(name);
+                long size = dirSize(d);
+                out.put(name, (prev == null ? 0L : prev) + size);
+            }
+        }
+        return out;
+    }
+
+    /*
+     * 把版本号时间戳转成可读时间。
+     * 支持三种常见格式：
+     *   14 位 → yyyyMMddHHmmss
+     *   13 位 → Unix 毫秒
+     *   10 位 → Unix 秒
+     * 解析失败时原样返回。
+     */
+    private static String formatVersionTimestamp(String version) {
+        if (version == null || version.isEmpty()) return "(未知)";
+        try {
+            if (version.matches("\\d{14}")) {
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat(
+                        "yyyyMMddHHmmss", java.util.Locale.US);
+                java.util.Date d = sdf.parse(version);
+                if (d != null) {
+                    return android.text.format.DateFormat.format(
+                            "yyyy-MM-dd HH:mm:ss", d).toString();
+                }
+            }
+            if (version.matches("\\d{13}")) {
+                long ms = Long.parseLong(version);
+                return android.text.format.DateFormat.format(
+                        "yyyy-MM-dd HH:mm:ss", ms).toString();
+            }
+            if (version.matches("\\d{10}")) {
+                long s = Long.parseLong(version);
+                return android.text.format.DateFormat.format(
+                        "yyyy-MM-dd HH:mm:ss", s * 1000L).toString();
+            }
+        } catch (Throwable ignored) {}
+        return version;
+    }
+
+
+
+    private static WebResourceResponse pageConfirmVersionPurge(String version, String quality) {
+        String label;
+        if (quality != null) {
+            label = "画质 " + quality + (version != null ? "（版本 " + version + "）" : "");
+        } else {
+            label = "版本 " + version + " 的全部内容";
+        }
+
+        long estimate = 0;
+        if (quality != null) {
+            long[] v = computeCurrentVersionStats().get(quality);
+            estimate = v == null ? 0 : v[0];
+        } else {
+            Map<String, Long> old = computeOldVersionStats();
+            Long v = old.get(version);
+            estimate = v == null ? 0 : v;
+        }
+
+        StringBuilder href = new StringBuilder();
+        href.append("https://").append(CMD_HOST).append(PATH_CLEAR);
+        boolean first = true;
+        if (version != null) { href.append(first ? "?" : "&").append("version=").append(version); first = false; }
+        if (quality != null) { href.append(first ? "?" : "&").append("quality=").append(quality); first = false; }
+        href.append(first ? "?" : "&").append("confirm=1");
+
+        String html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                + "<title>确认清理</title><style>" + css() + "</style></head><body>"
+                + "<div class=\"card\">"
+                + "<h1 style=\"color:#f87171;\">确认清理？</h1>"
+                + "<p style=\"color:#a0a0b0;font-size:13px;\">将清理：" + esc(label) + "</p>"
+                + "<div style=\"text-align:center;margin:16px 0;\">"
+                + "<div class=\"big\">" + fmtMB(estimate) + "</div></div>"
+                + "<a class=\"btn btn-danger\" href=\"" + href + "\">确认清理</a>"
+                + "<a class=\"btn\" href=\"https://" + CMD_HOST + PATH_CLEAR + "\">取消</a>"
+                + "<div class=\"footer\">GBF Cache Hook</div>"
+                + "</div></body></html>";
+        return htmlResponse(html);
     }
 
     private static WebResourceResponse pageConfirmFilter(
@@ -928,7 +1447,7 @@ public class GBFCacheHook extends XposedModule {
                 + "<h1>GBF Cache Hook</h1>"
                 + "<a class=\"btn\" href=\"https://" + CMD_HOST + PATH_STATUS + "\">查看缓存状态</a>"
                 + "<a class=\"btn\" href=\"https://" + CMD_HOST + PATH_CLEAR + "\">清理缓存</a>"
-                + "<a class=\"btn btn-warn\" href=\"https://" + CMD_HOST + PATH_CLEAR + "?action=sync\">整理缓存</a>"
+                + "<a class=\"btn\" href=\"https://" + CMD_HOST + PATH_FILES + "\">文件管理</a>"
                 + "<div class=\"footer\">GBF Cache Hook</div>"
                 + "</div></body></html>";
         return htmlResponse(html);
@@ -1079,6 +1598,204 @@ public class GBFCacheHook extends XposedModule {
 
         removeEmptyDirs(CACHE_ROOT);
         return freed;
+    }
+
+    // ================== 文件管理器 ==================
+
+    private static WebResourceResponse pageFiles(String relPath) {
+        if (CACHE_ROOT == null) return pageSimple("错误", "缓存未初始化", "");
+        if (relPath == null) relPath = "";
+
+        File target;
+        try {
+            target = new File(CACHE_ROOT, relPath).getCanonicalFile();
+            String root = CACHE_ROOT.getCanonicalPath();
+            if (!target.getPath().equals(root)
+                    && !target.getPath().startsWith(root + File.separator)) {
+                return pageSimple("错误", "非法路径", esc(relPath));
+            }
+        } catch (Throwable t) {
+            return pageSimple("错误", "路径解析失败", String.valueOf(t));
+        }
+
+        if (target.isFile()) return pageFileDetail(target, relPath);
+        if (!target.isDirectory()) return pageSimple("错误", "路径不存在", esc(relPath));
+
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
+                .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+                .append("<title>文件管理</title><style>").append(css()).append("</style>")
+                .append("</head><body>");
+
+        html.append("<div class=\"card\">")
+                .append("<h1>文件管理</h1>")
+                .append("<div style=\"color:#a0a0b0;font-size:12px;word-break:break-all;\">")
+                .append(renderBreadcrumb(relPath))
+                .append("</div>")
+                .append("<div style=\"color:#888;font-size:12px;margin-top:6px;\">")
+                .append(fmtMB(dirSize(target))).append(" · ")
+                .append(countFilesIn(target)).append(" 个文件</div>")
+                .append("</div>");
+
+        html.append("<div class=\"card\">");
+
+        if (!relPath.isEmpty()) {
+            String parent = parentPath(relPath);
+            html.append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_FILES)
+                    .append("?path=").append(Uri.encode(parent))
+                    .append("\">⬆ 返回上级</a>");
+        }
+
+        File[] children = target.listFiles();
+        if (children != null) {
+            java.util.Arrays.sort(children, new java.util.Comparator<File>() {
+                @Override
+                public int compare(File a, File b) {
+                    if (a.isDirectory() != b.isDirectory()) {
+                        return a.isDirectory() ? -1 : 1;
+                    }
+                    return a.getName().compareToIgnoreCase(b.getName());
+                }
+            });
+
+            for (File f : children) {
+                String childRel = relPath.isEmpty() ? f.getName() : relPath + "/" + f.getName();
+                String encoded = Uri.encode(childRel);
+
+                if (f.isDirectory()) {
+                    html.append("<a class=\"btn\" style=\"display:flex;justify-content:space-between;"
+                                    + "text-align:left;\" href=\"https://").append(CMD_HOST)
+                            .append(PATH_FILES).append("?path=").append(encoded).append("\">")
+                            .append("<span>📁 ").append(esc(f.getName())).append("</span>")
+                            .append("<span style=\"color:#a0a0b0;font-size:12px;\">")
+                            .append(fmtMB(dirSize(f))).append("</span></a>");
+                } else {
+                    html.append("<div style=\"display:flex;justify-content:space-between;")
+                            .append("align-items:center;padding:8px 0;border-bottom:1px solid #2a2a3e;\">")
+                            .append("<a href=\"https://").append(CMD_HOST).append(PATH_FILES)
+                            .append("?path=").append(encoded)
+                            .append("\" style=\"color:#c0c0d0;text-decoration:none;flex:1;")
+                            .append("word-break:break-all;font-size:12px;\">")
+                            .append(esc(f.getName())).append("</a>")
+                            .append("<span style=\"color:#888;font-size:11px;margin:0 8px;\">")
+                            .append(fmtMB(f.length())).append("</span>")
+                            .append("<a href=\"https://").append(CMD_HOST).append(PATH_FILES)
+                            .append("?path=").append(encoded).append("&action=delete&confirm=1")
+                            .append("\" style=\"color:#f87171;font-size:12px;text-decoration:none;\">")
+                            .append("删</a>")
+                            .append("</div>");
+                }
+            }
+        }
+
+        html.append("</div>");
+        html.append("<div class=\"footer\">GBF Cache Hook</div>")
+                .append("</body></html>");
+        return htmlResponse(html.toString());
+    }
+
+    private static WebResourceResponse pageFileDetail(File file, String relPath) {
+        StringBuilder html = new StringBuilder();
+        html.append("<!DOCTYPE html><html><head><meta charset=\"utf-8\">")
+                .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+                .append("<title>文件详情</title><style>").append(css()).append("</style>")
+                .append("</head><body>");
+
+        html.append("<div class=\"card\"><h1>文件详情</h1>")
+                .append("<div style=\"word-break:break-all;font-size:12px;color:#c0c0d0;\">")
+                .append(renderBreadcrumb(relPath)).append("</div>")
+                .append("<div class=\"row\" style=\"margin-top:12px;\">")
+                .append("<span class=\"key\">大小</span>")
+                .append("<span class=\"val\">").append(fmtMB(file.length())).append("</span></div>")
+                .append("<div class=\"row\"><span class=\"key\">修改时间</span>")
+                .append("<span class=\"val\">")
+                .append(android.text.format.DateFormat.format("yyyy-MM-dd HH:mm", file.lastModified()))
+                .append("</span></div>")
+                .append("<a class=\"btn btn-danger\" href=\"https://").append(CMD_HOST)
+                .append(PATH_FILES).append("?path=").append(Uri.encode(relPath))
+                .append("&action=delete&confirm=1\">删除此文件</a>")
+                .append("<a class=\"btn\" href=\"https://").append(CMD_HOST).append(PATH_FILES)
+                .append("?path=").append(Uri.encode(parentPath(relPath)))
+                .append("\">返回</a>")
+                .append("</div>");
+
+        html.append("<div class=\"footer\">GBF Cache Hook</div></body></html>");
+        return htmlResponse(html.toString());
+    }
+
+    private static WebResourceResponse handleFileDelete(String relPath) {
+        if (CACHE_ROOT == null) return pageSimple("错误", "缓存未初始化", "");
+        File target;
+        try {
+            target = new File(CACHE_ROOT, relPath).getCanonicalFile();
+            String root = CACHE_ROOT.getCanonicalPath();
+            if (!target.getPath().startsWith(root + File.separator)) {
+                return pageSimple("错误", "非法路径", esc(relPath));
+            }
+        } catch (Throwable t) {
+            return pageSimple("错误", "路径解析失败", String.valueOf(t));
+        }
+
+        boolean ok = false;
+        try {
+            if (target.isDirectory()) {
+                deleteRecursive(target);
+                ok = !target.exists();
+            } else if (target.isFile()) {
+                ok = target.delete();
+            }
+        } catch (Throwable ignored) {}
+
+        String parent = parentPath(relPath);
+        String msg = ok ? "已删除：" + relPath : "删除失败：" + relPath;
+        String html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+                + "<title>删除结果</title><style>" + css() + "</style></head><body>"
+                + "<div class=\"card\"><h1>" + (ok ? "✓ 已删除" : "✗ 删除失败") + "</h1>"
+                + "<p style=\"color:#a0a0b0;font-size:12px;word-break:break-all;\">"
+                + esc(msg) + "</p>"
+                + "<a class=\"btn\" href=\"https://" + CMD_HOST + PATH_FILES
+                + "?path=" + Uri.encode(parent) + "\">返回上级</a>"
+                + "</div></body></html>";
+        return htmlResponse(html);
+    }
+
+    private static String parentPath(String relPath) {
+        if (relPath == null || relPath.isEmpty()) return "";
+        int idx = relPath.lastIndexOf('/');
+        return idx <= 0 ? "" : relPath.substring(0, idx);
+    }
+
+    private static String renderBreadcrumb(String relPath) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<a href=\"https://").append(CMD_HOST).append(PATH_FILES)
+                .append("\" style=\"color:#60a5fa;text-decoration:none;\">根目录</a>");
+        if (relPath == null || relPath.isEmpty()) return sb.toString();
+
+        String[] parts = relPath.split("/");
+        StringBuilder accum = new StringBuilder();
+        for (String part : parts) {
+            if (part.isEmpty()) continue;
+            if (accum.length() > 0) accum.append('/');
+            accum.append(part);
+            sb.append(" / <a href=\"https://").append(CMD_HOST).append(PATH_FILES)
+                    .append("?path=").append(Uri.encode(accum.toString()))
+                    .append("\" style=\"color:#60a5fa;text-decoration:none;\">")
+                    .append(esc(part)).append("</a>");
+        }
+        return sb.toString();
+    }
+
+    private static int countFilesIn(File dir) {
+        if (dir == null || !dir.isDirectory()) return 0;
+        int n = 0;
+        File[] children = dir.listFiles();
+        if (children == null) return 0;
+        for (File f : children) {
+            if (f.isDirectory()) n += countFilesIn(f);
+            else n++;
+        }
+        return n;
     }
 
     // ================== 缓存读写 ==================
@@ -1326,7 +2043,8 @@ public class GBFCacheHook extends XposedModule {
         if (host != null && host.toLowerCase().endsWith("akamaized.net")) {
             return true;
         }
-        if ("gbf.game.mbga.jp".equalsIgnoreCase(host)) {
+        if ("gbf.game.mbga.jp".equalsIgnoreCase(host)
+                || "game.granbluefantasy.jp".equalsIgnoreCase(host)) {
             return lower.startsWith("/assets/");
         }
         return false;
